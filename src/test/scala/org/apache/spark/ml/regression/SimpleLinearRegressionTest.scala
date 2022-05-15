@@ -17,8 +17,8 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
 
     "Model" should "predict input data" in {
         val model: SimpleLinearRegressionModel = new SimpleLinearRegressionModel(
-            coefficients = Vectors.dense(1.2, 0.8, -0.7).toDense,
-            intercept = -0.4
+            coefficients = Vectors.dense(1.5, 0.3),
+            intercept = -0.7
         )
 
         validateModel(model.transform(data))
@@ -30,7 +30,7 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
         val predictUDF = udf { features: Any =>
             val arr = features.asInstanceOf[Vector].toArray
 
-            1.2 * arr.apply(0) + 0.8 * arr.apply(1) - 0.7 * arr.apply(2) - 0.4
+            1.5 * arr.apply(0) + 0.3 * arr.apply(1) - 0.7
         }
 
         val dataset = data.withColumn("label", predictUDF(col("features")))
@@ -48,13 +48,13 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
         val predictUDF = udf { features: Any =>
             val arr = features.asInstanceOf[Vector].toArray
 
-            1.2 * arr.apply(0) + 0.8 * arr.apply(1) - 0.7 * arr.apply(2) - 0.4
+            1.5 * arr.apply(0) + 0.3 * arr.apply(1) - 0.7
         }
 
         import sqlContext.implicits._
 
         val randomData = Matrices
-            .rand(1000, 3, Random.self)
+            .rand(1000, 2, Random.self)
             .rowIter
             .toSeq
             .map(x => Tuple1(x))
@@ -64,15 +64,10 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
 
         val model = estimator.fit(dataset)
 
-        println(model.coefficients, model.intercept)
+        model.coefficients(0) should be(1.5 +- delta)
+        model.coefficients(1) should be(0.3 +- delta)
 
-        val vector = model.transform(
-            Seq(Vectors.dense(1.5, 0.3, -0.7)).map(x => Tuple1(x)).toDF("features")
-        ).collect().map(_.getAs[Double](1))
-
-        vector.length should be(1)
-
-        vector(0) should be(2.13 +- delta)
+        model.intercept should be(-0.7 +- delta)
     }
 
     private def validateModel(data: DataFrame): Unit = {
@@ -80,8 +75,8 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
 
         vector.length should be(2)
 
-        vector(0) should be(21.9 +- delta)
-        vector(1) should be(-4.4 +- delta)
+        vector(0) should be(23.15 +- delta)
+        vector(1) should be(-1.6 +- delta)
     }
 
 }
@@ -89,8 +84,8 @@ class SimpleLinearRegressionTest extends AnyFlatSpec with should.Matchers with W
 object StandardScalerTest extends WithSpark {
 
     lazy val _vectors: Seq[Vector] = Seq(
-        Vectors.dense(13.5, 12, 5),
-        Vectors.dense(-1, 0, 4)
+        Vectors.dense(13.5, 12),
+        Vectors.dense(-1, 2)
     )
 
     lazy val _data: DataFrame = {
