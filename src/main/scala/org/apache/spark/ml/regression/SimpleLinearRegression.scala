@@ -1,18 +1,21 @@
 package org.apache.spark.ml.regression
 
-import breeze.linalg.{DenseMatrix, sum}
-import org.apache.spark.ml.linalg.{Vector, DenseVector, VectorUDT, Vectors}
-import org.apache.spark.ml.param.shared.HasMaxIter
+import breeze.linalg.DenseVector
+import breeze.linalg.functions.euclideanDistance
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.linalg.{Vector, VectorUDT, Vectors}
+import org.apache.spark.ml.param.shared.{HasMaxIter, HasTol}
 import org.apache.spark.ml.param.{DoubleParam, Param, ParamMap}
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model, PredictorParams}
+import org.apache.spark.mllib.linalg.{Vectors => MLLibVectors}
+import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Encoder}
 
-
-trait SimpleLinearRegressionParams extends PredictorParams with HasMaxIter {
+trait SimpleLinearRegressionParams extends PredictorParams with HasMaxIter with HasTol {
 
     def setFeaturesCol(value: String): this.type = set(featuresCol, value)
 
@@ -24,15 +27,17 @@ trait SimpleLinearRegressionParams extends PredictorParams with HasMaxIter {
 
     def setLearningRate(value: Double): this.type = set(learningRate, value)
 
+    def setTol(value: Double): this.type = set(tol, value)
+
     final val learningRate: Param[Double] = new DoubleParam(
         this,
         "learningRate",
         "learning rate"
     )
 
-    def getLeaningRate: Double = $(learningRate)
+    def getLearningRate: Double = $(learningRate)
 
-    setDefault(learningRate -> 0.001)
+    setDefault(maxIter -> 1000, learningRate -> 0.05, tol -> 1e-7)
 
     protected def validateAndTransformSchema(schema: StructType): StructType = {
         SchemaUtils.checkColumnType(schema, getFeaturesCol, new VectorUDT())
@@ -54,34 +59,45 @@ class SimpleLinearRegression(
     def this() = this(Identifiable.randomUID("linearRegression"))
 
     override def fit(dataset: Dataset[_]): SimpleLinearRegressionModel = {
-        val numFeatures = MetadataUtils.getNumFeatures(dataset, $(featuresCol))
-
-        val n = dataset.count()
-        val epochs = getMaxIter
-        val lr = getLeaningRate
-
-        val coefficients = Vectors.zeros(numFeatures).asBreeze
-        var intercept = 0.0
-
-        // Used to convert untyped dataframes to datasets with vectors
         implicit val vectorEncoder: Encoder[Vector] = ExpressionEncoder()
-        implicit val doubleEncoder: Encoder[Double] = ExpressionEncoder()
 
-        val rows: Array[Vector] = dataset.select(dataset($(featuresCol)).as[Vector]).collect()
+        val assembler = new VectorAssembler().setInputCols(Array(getFeaturesCol, getLabelCol)).setOutputCol("result")
+        val vectors = assembler.transform(dataset).select("result").as[Vector]
 
-        val arr: Array[Double] = rows.flatMap(v => v.toArray)
+        val count = vectors.first().size - 1
+        val epochs = getMaxIter
+        val lr = getLearningRate
+        val tolerance = getTol
 
-        val x = DenseMatrix.create[Double](numFeatures, n.intValue(), arr).t
-        val y = Vectors.dense(dataset.select(dataset($(labelCol)).as[Double]).collect()).asBreeze
+        var oldWeights = DenseVector.fill(count, Double.PositiveInfinity)
+        val weights = DenseVector.fill(count, 0.0)
 
-        for (_ <- 0 until epochs) {
-            val yPred = x * coefficients + intercept - y
+        var i = 0
+        while (i < epochs && euclideanDistance(weights.toDenseVector, oldWeights.toDenseVector) > tolerance) {
+            i += 1
 
-            coefficients -= lr / n * (yPred.toDenseMatrix * x).t.toDenseVector
-            intercept -= lr / n * sum(yPred)
+            val summary = vectors.rdd.mapPartitions(data => {
+                val summarizer = new MultivariateOnlineSummarizer()
+
+                data.foreach(row => {
+                    val x = row.asBreeze(0 until count).toDenseVector
+                    val y = row.asBreeze(-1)
+
+                    val yPred = x.dot(weights)
+
+                    summarizer.add(MLLibVectors.fromBreeze((yPred - y) * x))
+                })
+
+                Iterator(summarizer)
+            }).reduce(_ merge _)
+
+            oldWeights = weights.copy
+            weights -= lr * summary.mean.asBreeze
         }
 
-        copyValues(new SimpleLinearRegressionModel(Vectors.fromBreeze(coefficients), intercept)).setParent(this)
+        println(s"Took $i epochs to finish")
+
+        copyValues(new SimpleLinearRegressionModel(Vectors.fromBreeze(weights)).setParent(this))
     }
 
     override def copy(extra: ParamMap): Estimator[SimpleLinearRegressionModel] = defaultCopy(extra)
@@ -92,14 +108,12 @@ class SimpleLinearRegression(
 
 class SimpleLinearRegressionModel(
     override val uid: String,
-    val coefficients: DenseVector,
-    val intercept   : Double
+    val coefficients: Vector,
 ) extends Model[SimpleLinearRegressionModel] with SimpleLinearRegressionParams {
 
-    private[regression] def this(coefficients: Vector, intercept: Double) = this(
+    private[regression] def this(coefficients: Vector) = this(
         Identifiable.randomUID("linearRegressionModel"),
-        coefficients.toDense,
-        intercept
+        coefficients
     )
 
     override def transformSchema(schema: StructType): StructType = {
@@ -121,9 +135,9 @@ class SimpleLinearRegressionModel(
     }
 
     override def copy(extra: ParamMap): SimpleLinearRegressionModel = copyValues(
-        new SimpleLinearRegressionModel(coefficients, intercept), extra
+        new SimpleLinearRegressionModel(coefficients), extra
     )
 
-    private def predict(features: Vector) = features.asBreeze.dot(coefficients.asBreeze) + intercept
+    private def predict(features: Vector) = features.asBreeze.dot(coefficients.asBreeze)
 
 }

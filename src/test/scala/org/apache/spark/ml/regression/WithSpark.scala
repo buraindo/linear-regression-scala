@@ -13,5 +13,7 @@ object WithSpark {
     .master("local[4]")
     .getOrCreate()
 
+  sparkSession.sparkContext.setLogLevel("ERROR")
+
   lazy val sqlContext: SQLContext = sparkSession.sqlContext
 }
